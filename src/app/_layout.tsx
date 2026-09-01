@@ -1,18 +1,66 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
-import { useColorScheme } from 'react-native';
+import { Stack } from 'expo-router';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
-
-SplashScreen.preventAutoHideAsync();
-
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
+export default function RootLayout() {
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
-    </ThemeProvider>
+    <Stack>
+
+      <Stack.Screen
+        name="index"
+        options={{
+          title: 'Tableau de bord',
+          headerShown: false,
+        }}
+      />
+
+      <Stack.Screen
+        name="clients"
+        options={{
+          title: 'Clients',
+        }}
+      />
+
+      <Stack.Screen
+        name="client/[id]"
+        options={{
+          title: 'Détail du client',
+        }}
+      />
+
+      <Stack.Screen
+        name="client/create"
+        options={{
+          title: 'Ajouter un client',
+        }}
+      />
+
+      <Stack.Screen
+        name="client/edit"
+        options={{
+          title: 'Modifier le client',
+        }}
+      />
+
+      <Stack.Screen
+        name="commandes"
+        options={{
+          title: 'Commandes',
+        }}
+      />
+
+      <Stack.Screen
+        name="factures"
+        options={{
+          title: 'Factures',
+        }}
+      />
+
+      <Stack.Screen
+        name="statistiques"
+        options={{
+          title: 'Statistiques',
+        }}
+      />
+
+    </Stack>
   );
 }
