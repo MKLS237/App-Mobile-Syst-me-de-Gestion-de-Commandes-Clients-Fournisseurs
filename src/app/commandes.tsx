@@ -1,5 +1,15 @@
 import { useCallback, useMemo, useState } from 'react';
 import { router, useFocusEffect } from 'expo-router';
+import {
+  ArrowRight,
+  BarChart3,
+  CheckCircle2,
+  Clock3,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-react-native';
 
 import {
   ActivityIndicator,
@@ -8,6 +18,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  TouchableOpacity,
   View,
 } from 'react-native';
 
@@ -461,27 +472,32 @@ export default function CommandesScreen() {
 
       {/* HEADER */}
       <View style={styles.header}>
-        <View>
-          <Text style={styles.title}>
-            Commandes
-          </Text>
+  <View style={styles.headerInfo}>
+    <Text style={styles.title}>Commandes</Text>
 
-          <Text style={styles.subtitle}>
-            Gérez et suivez vos commandes
-          </Text>
-        </View>
+    <Text style={styles.subtitle}>
+      Gestion de vos commandes
+    </Text>
+  </View>
 
-        <Pressable
-          style={styles.addButton}
-          onPress={() =>
-            router.push('/commande/create')
-          }
-        >
-          <Text style={styles.addButtonText}>
-            +
-          </Text>
-        </Pressable>
-      </View>
+  <View style={styles.headerActions}>
+    <TouchableOpacity
+      style={styles.statsButton}
+      onPress={() => router.push('/commande/statistiques')}
+      activeOpacity={0.8}
+    >
+      <BarChart3 size={20} color="#208AEF" />
+    </TouchableOpacity>
+
+    <TouchableOpacity
+      style={styles.addButton}
+      onPress={() => router.push('/commande/create')}
+      activeOpacity={0.8}
+    >
+      <Plus size={22} color="#FFFFFF" />
+    </TouchableOpacity>
+  </View>
+</View>
 
       {/* MINI STATS */}
       <View style={styles.statsCard}>
@@ -1287,6 +1303,26 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     marginTop: 5,
   },
+  headerInfo: {
+  flex: 1,
+},
+
+headerActions: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 10,
+},
+
+statsButton: {
+  width: 44,
+  height: 44,
+  borderRadius: 14,
+  backgroundColor: '#EAF5FF',
+  alignItems: 'center',
+  justifyContent: 'center',
+  borderWidth: 1,
+  borderColor: '#D7EBFF',
+},
 
   /* ERROR */
 
