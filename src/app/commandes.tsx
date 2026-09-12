@@ -1,18 +1,20 @@
 import { useCallback, useMemo, useState } from 'react';
 import { router, useFocusEffect } from 'expo-router';
+
 import {
   ArrowRight,
   BarChart3,
   CheckCircle2,
   Clock3,
+  FileText,
   Plus,
   Search,
-  Trash2,
   X,
 } from 'lucide-react-native';
 
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   StyleSheet,
@@ -24,8 +26,16 @@ import {
 
 import { Commande } from '../models/commande';
 import { getCommandes } from '../services/commandeService';
+import {
+  generateFacture,
+  getFactures,
+} from '../services/factureService';
 
-type FiltreStatut = 'TOUTES' | 'LIVREE' | 'NON_LIVREE' | 'LIVREE_PARTIELLEMENT';
+type FiltreStatut =
+  | 'TOUTES'
+  | 'LIVREE'
+  | 'NON_LIVREE'
+  | 'LIVREE_PARTIELLEMENT';
 
 export default function CommandesScreen() {
   const [commandes, setCommandes] = useState<Commande[]>([]);
@@ -36,23 +46,77 @@ export default function CommandesScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * Association :
+   * commandeId -> factureId
+   */
+  const [facturesByCommande, setFacturesByCommande] =
+    useState<Record<number, number>>({});
+
+  /**
+   * ID de la commande dont la facture est en cours
+   * de génération.
+   */
+  const [generatingFactureId, setGeneratingFactureId] =
+    useState<number | null>(null);
+
+  /**
+   * ============================================================
+   * CHARGEMENT DES COMMANDES + FACTURES
+   * ============================================================
+   */
   useFocusEffect(
     useCallback(() => {
-      chargerCommandes();
+      chargerDonnees();
     }, [])
   );
 
-  async function chargerCommandes() {
+  async function chargerDonnees() {
     try {
       setLoading(true);
       setError(null);
 
-      const data = await getCommandes();
+      const [commandesData, facturesData] =
+        await Promise.all([
+          getCommandes(),
+          getFactures(),
+        ]);
 
-      setCommandes(data);
+      /**
+       * TRI PRINCIPAL :
+       * ID décroissant = commande la plus récente
+       * en haut de la liste.
+       */
+      const commandesTriees = [...commandesData].sort(
+        (a, b) => Number(b.id) - Number(a.id)
+      );
+
+      setCommandes(commandesTriees);
+
+      /**
+       * Création de la correspondance :
+       *
+       * commande #15 -> facture #28
+       * commande #14 -> facture #27
+       */
+      const correspondances =
+        facturesData.reduce<Record<number, number>>(
+          (acc, facture) => {
+            const commandeId = facture.commande?.id;
+
+            if (commandeId !== undefined && commandeId !== null) {
+              acc[Number(commandeId)] = Number(facture.id);
+            }
+
+            return acc;
+          },
+          {}
+        );
+
+      setFacturesByCommande(correspondances);
     } catch (error) {
       console.error(
-        'Erreur chargement commandes :',
+        'Erreur chargement commandes/factures :',
         error
       );
 
@@ -64,16 +128,84 @@ export default function CommandesScreen() {
     }
   }
 
-  /*
-   * Statistiques rapides
+  /**
+   * ============================================================
+   * GÉNÉRER UNE FACTURE
+   * ============================================================
+   */
+  async function handleGenerateFacture(
+    commandeId: number
+  ) {
+    /**
+     * Protection contre les doubles clics.
+     */
+    if (generatingFactureId !== null) {
+      return;
+    }
+
+    /**
+     * Protection supplémentaire :
+     * si une facture existe déjà, on ne la régénère pas.
+     */
+    const factureExistante =
+      facturesByCommande[commandeId];
+
+    if (factureExistante !== undefined) {
+      Alert.alert(
+        'Facture déjà existante',
+        `La commande #${commandeId} possède déjà la facture #${factureExistante}.`
+      );
+
+      return;
+    }
+
+    try {
+      setGeneratingFactureId(commandeId);
+
+      const facture =
+        await generateFacture(commandeId);
+
+      /**
+       * Mise à jour immédiate de l'interface.
+       */
+      setFacturesByCommande((current) => ({
+        ...current,
+        [commandeId]: Number(facture.id),
+      }));
+
+      Alert.alert(
+        'Facture générée',
+        `La facture #${facture.id} a été créée avec succès pour la commande #${commandeId}.`
+      );
+    } catch (error) {
+      console.error(
+        'Erreur génération facture :',
+        error
+      );
+
+      Alert.alert(
+        'Génération impossible',
+        'La facture n’a pas pu être générée. Veuillez réessayer.'
+      );
+    } finally {
+      setGeneratingFactureId(null);
+    }
+  }
+
+  /**
+   * ============================================================
+   * STATISTIQUES RAPIDES
+   * ============================================================
    */
   const statistiques = useMemo(() => {
     const livrees = commandes.filter(
-      (commande) => commande.statut === 'LIVREE'
+      (commande) =>
+        commande.statut === 'LIVREE'
     ).length;
 
     const nonLivrees = commandes.filter(
-      (commande) => commande.statut === 'NON_LIVREE'
+      (commande) =>
+        commande.statut === 'NON_LIVREE'
     ).length;
 
     const partielles = commandes.filter(
@@ -83,9 +215,13 @@ export default function CommandesScreen() {
 
     const montantTotal = commandes.reduce(
       (total, commande) =>
-        total + Number(commande.prixTotal || 0),
+        total +
+        Number(commande.prixTotal || 0),
       0
     );
+
+    const nombreFactures =
+      Object.keys(facturesByCommande).length;
 
     return {
       total: commandes.length,
@@ -93,55 +229,71 @@ export default function CommandesScreen() {
       nonLivrees,
       partielles,
       montantTotal,
+      nombreFactures,
     };
-  }, [commandes]);
+  }, [commandes, facturesByCommande]);
 
-  /*
-   * Recherche + filtre statut
+  /**
+   * ============================================================
+   * RECHERCHE + FILTRE
+   * ============================================================
    */
   const commandesFiltrees = useMemo(() => {
     const texte = recherche
       .trim()
       .toLowerCase();
 
-    return commandes.filter((commande) => {
-      const nomClient =
-        commande.client?.nom?.toLowerCase() || '';
+    return commandes
+      .filter((commande) => {
+        const nomClient =
+          commande.client?.nom?.toLowerCase() || '';
 
-      const prenomClient =
-        commande.client?.prenom?.toLowerCase() || '';
+        const prenomClient =
+          commande.client?.prenom?.toLowerCase() || '';
 
-      const designation =
-        commande.designation?.toLowerCase() || '';
+        const designation =
+          commande.designation?.toLowerCase() || '';
 
-      const statut =
-        commande.statut?.toLowerCase() || '';
+        const statut =
+          commande.statut?.toLowerCase() || '';
 
-      const correspondRecherche =
-        !texte ||
-        commande.id.toString().includes(texte) ||
-        nomClient.includes(texte) ||
-        prenomClient.includes(texte) ||
-        designation.includes(texte) ||
-        statut.includes(texte);
+        const correspondRecherche =
+          !texte ||
+          commande.id
+            .toString()
+            .includes(texte) ||
+          nomClient.includes(texte) ||
+          prenomClient.includes(texte) ||
+          designation.includes(texte) ||
+          statut.includes(texte);
 
-      const correspondStatut =
-        filtreStatut === 'TOUTES' ||
-        commande.statut === filtreStatut;
+        const correspondStatut =
+          filtreStatut === 'TOUTES' ||
+          commande.statut === filtreStatut;
 
-      return (
-        correspondRecherche &&
-        correspondStatut
+        return (
+          correspondRecherche &&
+          correspondStatut
+        );
+      })
+      /**
+       * Toujours conserver l'ordre :
+       * plus récent -> plus ancien.
+       */
+      .sort(
+        (a, b) =>
+          Number(b.id) - Number(a.id)
       );
-    });
   }, [
     commandes,
     recherche,
     filtreStatut,
   ]);
 
-  /*
-   * Statut visuel
+  /**
+   * ============================================================
+   * STATUT VISUEL
+   * ============================================================
    */
   function getStatutConfig(statut: string) {
     switch (statut) {
@@ -172,19 +324,25 @@ export default function CommandesScreen() {
     }
   }
 
-  /*
-   * Format montant
+  /**
+   * ============================================================
+   * FORMAT MONTANT
+   * ============================================================
    */
   function formatMontant(montant: number) {
-    return Number(montant || 0).toLocaleString(
-      'fr-FR'
-    );
+    return Number(
+      montant || 0
+    ).toLocaleString('fr-FR');
   }
 
-  /*
-   * Format date
+  /**
+   * ============================================================
+   * FORMAT DATE
+   * ============================================================
    */
-  function formatDate(date?: string | null) {
+  function formatDate(
+    date?: string | null
+  ) {
     if (!date) {
       return '--';
     }
@@ -198,17 +356,18 @@ export default function CommandesScreen() {
     return `${morceaux[2]}/${morceaux[1]}/${morceaux[0]}`;
   }
 
-  /*
-   * Carte commande
+  /**
+   * ============================================================
+   * CARTE COMMANDE
+   * ============================================================
    */
   function afficherCommande({
     item,
   }: {
     item: Commande;
   }) {
-    const statut = getStatutConfig(
-      item.statut
-    );
+    const statut =
+      getStatutConfig(item.statut);
 
     const nomClient = [
       item.client?.prenom,
@@ -217,202 +376,382 @@ export default function CommandesScreen() {
       .filter(Boolean)
       .join(' ');
 
+    const factureId =
+      facturesByCommande[item.id];
+
+    const factureExiste =
+      factureId !== undefined;
+
+    const isGenerating =
+      generatingFactureId === item.id;
+
     return (
-      <Pressable
-        style={({ pressed }) => [
-          styles.card,
-          pressed && styles.cardPressed,
-        ]}
-        onPress={() =>
-          router.push({
-            pathname: '/commande/[id]',
-            params: {
-              id: item.id.toString(),
-            },
-          })
-        }
-      >
-        {/* HEADER CARTE */}
-        <View style={styles.cardTop}>
-          <View>
-            <Text style={styles.commandeLabel}>
-              COMMANDE
-            </Text>
-
-            <Text style={styles.commandeNumber}>
-              #{item.id}
-            </Text>
-          </View>
-
-          <View
-            style={[
-              styles.statusBadge,
-              {
-                backgroundColor:
-                  statut.background,
+      <View style={styles.card}>
+        {/* ==================================================
+            ZONE PRINCIPALE DE LA COMMANDE
+            ================================================== */}
+        <Pressable
+          style={({ pressed }) => [
+            styles.cardMain,
+            pressed && styles.cardPressed,
+          ]}
+          onPress={() =>
+            router.push({
+              pathname: '/commande/[id]',
+              params: {
+                id: item.id.toString(),
               },
-            ]}
-          >
+            })
+          }
+        >
+          {/* HEADER CARTE */}
+          <View style={styles.cardTop}>
+            <View>
+              <View style={styles.orderLabelRow}>
+                <Text style={styles.commandeLabel}>
+                  COMMANDE
+                </Text>
+
+                {item.id === commandes[0]?.id && (
+                  <View style={styles.recentBadge}>
+                    <Text style={styles.recentBadgeText}>
+                      RÉCENTE
+                    </Text>
+                  </View>
+                )}
+              </View>
+
+              <Text style={styles.commandeNumber}>
+                #{item.id}
+              </Text>
+            </View>
+
             <View
               style={[
-                styles.statusDot,
+                styles.statusBadge,
                 {
                   backgroundColor:
-                    statut.dot,
-                },
-              ]}
-            />
-
-            <Text
-              style={[
-                styles.statusText,
-                {
-                  color: statut.text,
+                    statut.background,
                 },
               ]}
             >
-              {statut.label}
-            </Text>
-          </View>
-        </View>
+              <View
+                style={[
+                  styles.statusDot,
+                  {
+                    backgroundColor:
+                      statut.dot,
+                  },
+                ]}
+              />
 
-        {/* CLIENT */}
-        <View style={styles.clientSection}>
-          <View style={styles.clientAvatar}>
-            <Text style={styles.clientAvatarText}>
-              {(
-                item.client?.prenom ||
-                item.client?.nom ||
-                '?'
-              )
-                .charAt(0)
-                .toUpperCase()}
-            </Text>
-          </View>
-
-          <View style={styles.clientInfo}>
-            <Text style={styles.clientLabel}>
-              CLIENT
-            </Text>
-
-            <Text
-              style={styles.clientName}
-              numberOfLines={1}
-            >
-              {nomClient || 'Client inconnu'}
-            </Text>
-
-            {item.client?.telephone ? (
-              <Text style={styles.clientPhone}>
-                {item.client.telephone}
+              <Text
+                style={[
+                  styles.statusText,
+                  {
+                    color: statut.text,
+                  },
+                ]}
+              >
+                {statut.label}
               </Text>
-            ) : null}
-          </View>
-        </View>
-
-        {/* PRODUIT */}
-        <View style={styles.productBox}>
-          <View style={styles.productHeader}>
-            <Text style={styles.productLabel}>
-              DÉSIGNATION
-            </Text>
-
-            <Text style={styles.quantity}>
-              × {item.quantite}
-            </Text>
+            </View>
           </View>
 
-          <Text
-            style={styles.productName}
-            numberOfLines={2}
-          >
-            {item.designation}
-          </Text>
+          {/* CLIENT */}
+          <View style={styles.clientSection}>
+            <View style={styles.clientAvatar}>
+              <Text
+                style={styles.clientAvatarText}
+              >
+                {(
+                  item.client?.prenom ||
+                  item.client?.nom ||
+                  '?'
+                )
+                  .charAt(0)
+                  .toUpperCase()}
+              </Text>
+            </View>
 
-          <View style={styles.priceRow}>
-            <Text style={styles.unitPriceLabel}>
-              Prix unitaire
-            </Text>
+            <View style={styles.clientInfo}>
+              <Text style={styles.clientLabel}>
+                CLIENT
+              </Text>
 
-            <Text style={styles.unitPrice}>
-              {formatMontant(
-                item.prixUnitaire
-              )}{' '}
-              FCFA
-            </Text>
+              <Text
+                style={styles.clientName}
+                numberOfLines={1}
+              >
+                {nomClient ||
+                  'Client inconnu'}
+              </Text>
+
+              {item.client?.telephone ? (
+                <Text
+                  style={styles.clientPhone}
+                >
+                  {item.client.telephone}
+                </Text>
+              ) : null}
+            </View>
+
+            <View style={styles.detailsIndicator}>
+              <ArrowRight
+                size={17}
+                color="#2563EB"
+              />
+            </View>
           </View>
-        </View>
 
-        {/* TOTAL */}
-        <View style={styles.totalSection}>
-          <View>
-            <Text style={styles.totalLabel}>
-              TOTAL COMMANDE
+          {/* PRODUIT */}
+          <View style={styles.productBox}>
+            <View style={styles.productHeader}>
+              <Text
+                style={styles.productLabel}
+              >
+                DÉSIGNATION
+              </Text>
+
+              <View
+                style={styles.quantityBadge}
+              >
+                <Text
+                  style={styles.quantity}
+                >
+                  × {item.quantite}
+                </Text>
+              </View>
+            </View>
+
+            <Text
+              style={styles.productName}
+              numberOfLines={2}
+            >
+              {item.designation}
             </Text>
 
-            <Text style={styles.totalValue}>
-              {formatMontant(
-                item.prixTotal
-              )}{' '}
-              <Text style={styles.totalCurrency}>
+            <View style={styles.priceRow}>
+              <Text
+                style={styles.unitPriceLabel}
+              >
+                Prix unitaire
+              </Text>
+
+              <Text
+                style={styles.unitPrice}
+              >
+                {formatMontant(
+                  item.prixUnitaire
+                )}{' '}
                 FCFA
               </Text>
-            </Text>
-          </View>
-
-          <View style={styles.arrowButton}>
-            <Text style={styles.arrow}>
-              →
-            </Text>
-          </View>
-        </View>
-
-        {/* DATES */}
-        <View style={styles.datesSection}>
-          <View style={styles.dateItem}>
-            <Text style={styles.dateIcon}>
-              ◷
-            </Text>
-
-            <View>
-              <Text style={styles.dateLabel}>
-                Commandée le
-              </Text>
-
-              <Text style={styles.dateValue}>
-                {formatDate(
-                  item.dateCommande
-                )}
-              </Text>
             </View>
           </View>
 
-          <View style={styles.dateSeparator} />
-
-          <View style={styles.dateItem}>
-            <Text style={styles.dateIcon}>
-              ✓
-            </Text>
-
+          {/* TOTAL */}
+          <View style={styles.totalSection}>
             <View>
-              <Text style={styles.dateLabel}>
-                Livraison
+              <Text style={styles.totalLabel}>
+                TOTAL COMMANDE
               </Text>
 
-              <Text style={styles.dateValue}>
-                {formatDate(
-                  item.dateLivraison
-                )}
+              <Text style={styles.totalValue}>
+                {formatMontant(
+                  item.prixTotal
+                )}{' '}
+                <Text
+                  style={styles.totalCurrency}
+                >
+                  FCFA
+                </Text>
               </Text>
             </View>
+
+            <View style={styles.arrowButton}>
+              <ArrowRight
+                size={19}
+                color="#2563EB"
+              />
+            </View>
           </View>
+
+          {/* DATES */}
+          <View style={styles.datesSection}>
+            <View style={styles.dateItem}>
+              <View style={styles.dateIconBox}>
+                <Clock3
+                  size={14}
+                  color="#6B7280"
+                />
+              </View>
+
+              <View>
+                <Text style={styles.dateLabel}>
+                  Commandée le
+                </Text>
+
+                <Text style={styles.dateValue}>
+                  {formatDate(
+                    item.dateCommande
+                  )}
+                </Text>
+              </View>
+            </View>
+
+            <View
+              style={styles.dateSeparator}
+            />
+
+            <View style={styles.dateItem}>
+              <View style={styles.dateIconBox}>
+                <CheckCircle2
+                  size={14}
+                  color={
+                    item.dateLivraison
+                      ? '#16A34A'
+                      : '#9CA3AF'
+                  }
+                />
+              </View>
+
+              <View>
+                <Text style={styles.dateLabel}>
+                  Livraison
+                </Text>
+
+                <Text style={styles.dateValue}>
+                  {formatDate(
+                    item.dateLivraison
+                  )}
+                </Text>
+              </View>
+            </View>
+          </View>
+        </Pressable>
+
+        {/* ==================================================
+            ACTION FACTURE
+            INDÉPENDANTE DU CLIC DE LA CARTE
+            ================================================== */}
+        <View
+          style={styles.factureActionWrapper}
+        >
+          {factureExiste ? (
+            <View
+              style={styles.factureGenerated}
+            >
+              <View
+                style={styles.factureGeneratedIcon}
+              >
+                <CheckCircle2
+                  size={20}
+                  color="#15803D"
+                />
+              </View>
+
+              <View
+                style={styles.factureGeneratedInfo}
+              >
+                <Text
+                  style={
+                    styles.factureGeneratedTitle
+                  }
+                >
+                  FACTURE DISPONIBLE
+                </Text>
+
+                <Text
+                  style={
+                    styles.factureGeneratedSubtitle
+                  }
+                >
+                  Facture #{factureId} •
+                  Générée avec succès
+                </Text>
+              </View>
+
+              <View
+                style={styles.factureReadyBadge}
+              >
+                <FileText
+                  size={17}
+                  color="#15803D"
+                />
+              </View>
+            </View>
+          ) : (
+            <Pressable
+              disabled={isGenerating}
+              onPress={() =>
+                handleGenerateFacture(
+                  item.id
+                )
+              }
+              style={({ pressed }) => [
+                styles.generateFactureButton,
+                pressed &&
+                  !isGenerating &&
+                  styles.generateFacturePressed,
+                isGenerating &&
+                  styles.generateFactureDisabled,
+              ]}
+            >
+              <View
+                style={styles.invoiceButtonIcon}
+              >
+                {isGenerating ? (
+                  <ActivityIndicator
+                    size="small"
+                    color="#2563EB"
+                  />
+                ) : (
+                  <FileText
+                    size={20}
+                    color="#2563EB"
+                  />
+                )}
+              </View>
+
+              <View
+                style={styles.generateFactureText}
+              >
+                <Text
+                  style={styles.generateFactureTitle}
+                >
+                  {isGenerating
+                    ? 'GÉNÉRATION EN COURS...'
+                    : 'GÉNÉRER LA FACTURE'}
+                </Text>
+
+                <Text
+                  style={
+                    styles.generateFactureSubtitle
+                  }
+                >
+                  {isGenerating
+                    ? 'Création de votre facture'
+                    : 'Créer la facture de cette commande'}
+                </Text>
+              </View>
+
+              {!isGenerating && (
+                <ArrowRight
+                  size={19}
+                  color="#2563EB"
+                />
+              )}
+            </Pressable>
+          )}
         </View>
-      </Pressable>
+      </View>
     );
   }
 
-  /*
-   * Écran chargement
+  /**
+   * ============================================================
+   * CHARGEMENT
+   * ============================================================
    */
   if (loading) {
     return (
@@ -435,8 +774,10 @@ export default function CommandesScreen() {
     );
   }
 
-  /*
-   * Écran erreur
+  /**
+   * ============================================================
+   * ERREUR
+   * ============================================================
    */
   if (error) {
     return (
@@ -457,7 +798,7 @@ export default function CommandesScreen() {
 
         <Pressable
           style={styles.retryButton}
-          onPress={chargerCommandes}
+          onPress={chargerDonnees}
         >
           <Text style={styles.retryText}>
             Réessayer
@@ -467,51 +808,71 @@ export default function CommandesScreen() {
     );
   }
 
+  /**
+   * ============================================================
+   * INTERFACE PRINCIPALE
+   * ============================================================
+   */
   return (
     <View style={styles.container}>
-
       {/* HEADER */}
       <View style={styles.header}>
-  <View style={styles.headerInfo}>
-    <Text style={styles.title}>Commandes</Text>
+        <View style={styles.headerInfo}>
+          <Text style={styles.title}>
+            Commandes
+          </Text>
 
-    <Text style={styles.subtitle}>
-      Gestion de vos commandes
-    </Text>
-  </View>
+          <Text style={styles.subtitle}>
+            Les plus récentes en premier
+          </Text>
+        </View>
 
-  <View style={styles.headerActions}>
-    <TouchableOpacity
-      style={styles.statsButton}
-      onPress={() => router.push('/commande/statistiques')}
-      activeOpacity={0.8}
-    >
-      <BarChart3 size={20} color="#208AEF" />
-    </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity
+            style={styles.statsButton}
+            onPress={() =>
+              router.push(
+                '/commande/statistiques'
+              )
+            }
+            activeOpacity={0.8}
+          >
+            <BarChart3
+              size={20}
+              color="#208AEF"
+            />
+          </TouchableOpacity>
 
-    <TouchableOpacity
-      style={styles.addButton}
-      onPress={() => router.push('/commande/create')}
-      activeOpacity={0.8}
-    >
-      <Plus size={22} color="#FFFFFF" />
-    </TouchableOpacity>
-  </View>
-</View>
+          <TouchableOpacity
+            style={styles.addButton}
+            onPress={() =>
+              router.push('/commande/create')
+            }
+            activeOpacity={0.8}
+          >
+            <Plus
+              size={22}
+              color="#FFFFFF"
+            />
+          </TouchableOpacity>
+        </View>
+      </View>
 
       {/* MINI STATS */}
       <View style={styles.statsCard}>
         <View style={styles.mainStat}>
           <Text style={styles.mainStatLabel}>
-            TOTAL
+            COMMANDES
           </Text>
 
           <Text style={styles.mainStatValue}>
             {statistiques.total}
           </Text>
 
-          <Text style={styles.mainStatDescription}>
-            commande(s)
+          <Text
+            style={styles.mainStatDescription}
+          >
+            au total
           </Text>
         </View>
 
@@ -528,11 +889,15 @@ export default function CommandesScreen() {
             ]}
           />
 
-          <Text style={styles.smallStatValue}>
+          <Text
+            style={styles.smallStatValue}
+          >
             {statistiques.livrees}
           </Text>
 
-          <Text style={styles.smallStatLabel}>
+          <Text
+            style={styles.smallStatLabel}
+          >
             Livrées
           </Text>
         </View>
@@ -548,21 +913,50 @@ export default function CommandesScreen() {
             ]}
           />
 
-          <Text style={styles.smallStatValue}>
+          <Text
+            style={styles.smallStatValue}
+          >
             {statistiques.nonLivrees}
           </Text>
 
-          <Text style={styles.smallStatLabel}>
+          <Text
+            style={styles.smallStatLabel}
+          >
             En attente
+          </Text>
+        </View>
+
+        <View style={styles.smallStat}>
+          <View
+            style={[
+              styles.smallDot,
+              {
+                backgroundColor:
+                  '#2563EB',
+              },
+            ]}
+          />
+
+          <Text
+            style={styles.smallStatValue}
+          >
+            {statistiques.nombreFactures}
+          </Text>
+
+          <Text
+            style={styles.smallStatLabel}
+          >
+            Factures
           </Text>
         </View>
       </View>
 
       {/* RECHERCHE */}
       <View style={styles.searchContainer}>
-        <Text style={styles.searchIcon}>
-          ⌕
-        </Text>
+        <Search
+          size={20}
+          color="#6B7280"
+        />
 
         <TextInput
           style={styles.search}
@@ -575,12 +969,15 @@ export default function CommandesScreen() {
 
         {recherche.length > 0 && (
           <Pressable
-            onPress={() => setRecherche('')}
+            onPress={() =>
+              setRecherche('')
+            }
             style={styles.clearButton}
           >
-            <Text style={styles.clearText}>
-              ×
-            </Text>
+            <X
+              size={16}
+              color="#6B7280"
+            />
           </Pressable>
         )}
       </View>
@@ -668,11 +1065,10 @@ export default function CommandesScreen() {
       {commandesFiltrees.length === 0 ? (
         <View style={styles.empty}>
           <View style={styles.emptyIcon}>
-            <Text style={styles.emptyIconText}>
-              {recherche
-                ? '⌕'
-                : '▱'}
-            </Text>
+            <Search
+              size={27}
+              color="#9CA3AF"
+            />
           </View>
 
           <Text style={styles.emptyTitle}>
@@ -691,11 +1087,15 @@ export default function CommandesScreen() {
               style={styles.resetButton}
               onPress={() => {
                 setRecherche('');
-                setFiltreStatut('TOUTES');
+                setFiltreStatut(
+                  'TOUTES'
+                );
               }}
             >
               <Text
-                style={styles.resetButtonText}
+                style={
+                  styles.resetButtonText
+                }
               >
                 Réinitialiser les filtres
               </Text>
@@ -727,13 +1127,19 @@ const styles = StyleSheet.create({
     paddingTop: 16,
   },
 
-  /* HEADER */
+  /* ==========================================================
+     HEADER
+     ========================================================== */
 
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 18,
+  },
+
+  headerInfo: {
+    flex: 1,
   },
 
   title: {
@@ -746,6 +1152,23 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#6B7280',
     marginTop: 3,
+  },
+
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+
+  statsButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: '#EAF5FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#D7EBFF',
   },
 
   addButton: {
@@ -765,19 +1188,14 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
 
-  addButtonText: {
-    color: '#FFFFFF',
-    fontSize: 29,
-    fontWeight: '500',
-    lineHeight: 32,
-  },
-
-  /* STATS */
+  /* ==========================================================
+     STATS
+     ========================================================== */
 
   statsCard: {
     backgroundColor: '#FFFFFF',
     borderRadius: 18,
-    padding: 16,
+    padding: 14,
     marginBottom: 15,
     flexDirection: 'row',
     alignItems: 'center',
@@ -786,60 +1204,62 @@ const styles = StyleSheet.create({
   },
 
   mainStat: {
-    flex: 1.2,
+    flex: 1.1,
   },
 
   mainStatLabel: {
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '800',
     color: '#9CA3AF',
-    letterSpacing: 1,
+    letterSpacing: 0.8,
   },
 
   mainStatValue: {
-    fontSize: 28,
+    fontSize: 27,
     fontWeight: '800',
     color: '#111827',
     marginTop: 1,
   },
 
   mainStatDescription: {
-    fontSize: 12,
+    fontSize: 11,
     color: '#6B7280',
   },
 
   statDivider: {
     width: 1,
-    height: 48,
+    height: 45,
     backgroundColor: '#E5E7EB',
-    marginHorizontal: 12,
+    marginHorizontal: 7,
   },
 
   smallStat: {
-    flex: 1,
+    flex: 0.8,
     alignItems: 'center',
   },
 
   smallDot: {
-    width: 8,
-    height: 8,
+    width: 7,
+    height: 7,
     borderRadius: 4,
-    marginBottom: 5,
+    marginBottom: 4,
   },
 
   smallStatValue: {
-    fontSize: 19,
+    fontSize: 17,
     fontWeight: '800',
     color: '#111827',
   },
 
   smallStatLabel: {
-    fontSize: 10,
+    fontSize: 9,
     color: '#6B7280',
     marginTop: 2,
   },
 
-  /* SEARCH */
+  /* ==========================================================
+     SEARCH
+     ========================================================== */
 
   searchContainer: {
     height: 52,
@@ -853,22 +1273,12 @@ const styles = StyleSheet.create({
     marginBottom: 17,
   },
 
-  searchIcon: {
-    fontSize: 25,
-    color: '#6B7280',
-    marginRight: 8,
-    transform: [
-      {
-        rotate: '-15deg',
-      },
-    ],
-  },
-
   search: {
     flex: 1,
     height: '100%',
     fontSize: 15,
     color: '#111827',
+    marginLeft: 9,
   },
 
   clearButton: {
@@ -880,13 +1290,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 
-  clearText: {
-    fontSize: 20,
-    color: '#6B7280',
-    lineHeight: 22,
-  },
-
-  /* FILTRES */
+  /* ==========================================================
+     FILTRES
+     ========================================================== */
 
   filterHeader: {
     flexDirection: 'row',
@@ -944,17 +1350,22 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
 
-  /* CARD */
+  /* ==========================================================
+     LISTE
+     ========================================================== */
 
   list: {
     paddingTop: 2,
     paddingBottom: 30,
   },
 
+  /* ==========================================================
+     CARTE
+     ========================================================== */
+
   card: {
     backgroundColor: '#FFFFFF',
     borderRadius: 20,
-    padding: 16,
     marginBottom: 14,
     borderWidth: 1,
     borderColor: '#E5E7EB',
@@ -966,6 +1377,11 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 8,
     elevation: 2,
+    overflow: 'hidden',
+  },
+
+  cardMain: {
+    padding: 16,
   },
 
   cardPressed: {
@@ -984,11 +1400,31 @@ const styles = StyleSheet.create({
     marginBottom: 15,
   },
 
+  orderLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
   commandeLabel: {
     fontSize: 9,
     fontWeight: '800',
     color: '#9CA3AF',
     letterSpacing: 1,
+  },
+
+  recentBadge: {
+    marginLeft: 7,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 7,
+    backgroundColor: '#EAF3FF',
+  },
+
+  recentBadgeText: {
+    fontSize: 7,
+    fontWeight: '900',
+    color: '#2563EB',
+    letterSpacing: 0.5,
   },
 
   commandeNumber: {
@@ -1018,7 +1454,9 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 
-  /* CLIENT */
+  /* ==========================================================
+     CLIENT
+     ========================================================== */
 
   clientSection: {
     flexDirection: 'row',
@@ -1068,7 +1506,18 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  /* PRODUIT */
+  detailsIndicator: {
+    width: 32,
+    height: 32,
+    borderRadius: 11,
+    backgroundColor: '#F3F7FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  /* ==========================================================
+     PRODUIT
+     ========================================================== */
 
   productBox: {
     backgroundColor: '#F9FAFB',
@@ -1090,9 +1539,16 @@ const styles = StyleSheet.create({
     letterSpacing: 0.8,
   },
 
+  quantityBadge: {
+    backgroundColor: '#EAF3FF',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+
   quantity: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 11,
+    fontWeight: '800',
     color: '#2563EB',
   },
 
@@ -1124,7 +1580,9 @@ const styles = StyleSheet.create({
     color: '#4B5563',
   },
 
-  /* TOTAL */
+  /* ==========================================================
+     TOTAL
+     ========================================================== */
 
   totalSection: {
     flexDirection: 'row',
@@ -1162,13 +1620,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
 
-  arrow: {
-    color: '#2563EB',
-    fontSize: 20,
-    fontWeight: '700',
-  },
-
-  /* DATES */
+  /* ==========================================================
+     DATES
+     ========================================================== */
 
   datesSection: {
     marginTop: 15,
@@ -1185,16 +1639,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
 
-  dateIcon: {
+  dateIconBox: {
     width: 28,
     height: 28,
     borderRadius: 9,
     backgroundColor: '#F3F4F6',
-    textAlign: 'center',
-    textAlignVertical: 'center',
-    lineHeight: 28,
-    color: '#6B7280',
-    fontSize: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
     marginRight: 7,
   },
 
@@ -1217,7 +1668,120 @@ const styles = StyleSheet.create({
     marginHorizontal: 10,
   },
 
-  /* EMPTY */
+  /* ==========================================================
+     FACTURE
+     ========================================================== */
+
+  factureActionWrapper: {
+    borderTopWidth: 1,
+    borderTopColor: '#EEF0F3',
+    padding: 12,
+    backgroundColor: '#FCFDFE',
+  },
+
+  generateFactureButton: {
+    minHeight: 58,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F5F9FF',
+    borderWidth: 1,
+    borderColor: '#D7E7FA',
+    borderRadius: 15,
+    paddingVertical: 9,
+    paddingHorizontal: 11,
+  },
+
+  generateFacturePressed: {
+    backgroundColor: '#EDF5FF',
+    transform: [
+      {
+        scale: 0.985,
+      },
+    ],
+  },
+
+  generateFactureDisabled: {
+    opacity: 0.65,
+  },
+
+  invoiceButtonIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#E5F0FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 11,
+  },
+
+  generateFactureText: {
+    flex: 1,
+  },
+
+  generateFactureTitle: {
+    fontSize: 11,
+    fontWeight: '900',
+    color: '#1769AA',
+    letterSpacing: 0.35,
+  },
+
+  generateFactureSubtitle: {
+    marginTop: 3,
+    fontSize: 10,
+    color: '#718096',
+  },
+
+  factureGenerated: {
+    minHeight: 58,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F3FAF5',
+    borderWidth: 1,
+    borderColor: '#D3EBDD',
+    borderRadius: 15,
+    paddingVertical: 9,
+    paddingHorizontal: 11,
+  },
+
+  factureGeneratedIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#DFF3E5',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 11,
+  },
+
+  factureGeneratedInfo: {
+    flex: 1,
+  },
+
+  factureGeneratedTitle: {
+    fontSize: 11,
+    fontWeight: '900',
+    color: '#15803D',
+    letterSpacing: 0.35,
+  },
+
+  factureGeneratedSubtitle: {
+    marginTop: 3,
+    fontSize: 10,
+    color: '#607968',
+  },
+
+  factureReadyBadge: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+    backgroundColor: '#E5F5E9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  /* ==========================================================
+     EMPTY
+     ========================================================== */
 
   empty: {
     flex: 1,
@@ -1237,11 +1801,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 15,
-  },
-
-  emptyIconText: {
-    fontSize: 28,
-    color: '#9CA3AF',
   },
 
   emptyTitle: {
@@ -1272,7 +1831,9 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 
-  /* LOADING */
+  /* ==========================================================
+     LOADING
+     ========================================================== */
 
   center: {
     flex: 1,
@@ -1303,28 +1864,10 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     marginTop: 5,
   },
-  headerInfo: {
-  flex: 1,
-},
 
-headerActions: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  gap: 10,
-},
-
-statsButton: {
-  width: 44,
-  height: 44,
-  borderRadius: 14,
-  backgroundColor: '#EAF5FF',
-  alignItems: 'center',
-  justifyContent: 'center',
-  borderWidth: 1,
-  borderColor: '#D7EBFF',
-},
-
-  /* ERROR */
+  /* ==========================================================
+     ERROR
+     ========================================================== */
 
   errorIcon: {
     width: 55,
